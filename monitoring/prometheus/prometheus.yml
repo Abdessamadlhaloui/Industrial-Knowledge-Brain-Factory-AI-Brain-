@@ -1,0 +1,60 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "api-gateway"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api-gateway:8000"]
+        labels:
+          service: api_gateway
+
+  - job_name: "rag-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rag-service:8000"]
+        labels:
+          service: rag_service
+
+  - job_name: "agent-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["agent-service:8000"]
+        labels:
+          service: agent_service
+
+  - job_name: "telemetry-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["telemetry-service:8000"]
+        labels:
+          service: telemetry_service
+
+  - job_name: "knowledge-graph-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["knowledge-graph-service:8000"]
+        labels:
+          service: knowledge_graph_service
+
+  - job_name: "ingestion-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ingestion-service:8000"]
+        labels:
+          service: ingestion_service
+
+  - job_name: "neo4j"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["neo4j:2004"]
+
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["kafka:9092"]
