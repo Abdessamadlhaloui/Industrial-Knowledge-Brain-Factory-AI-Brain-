@@ -1,0 +1,444 @@
+version: "3.9"
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  env_file:
+    - .env
+  networks:
+    - ikb-network
+
+x-backend-defaults: &backend-defaults
+  <<: *service-defaults
+  build:
+    context: .
+    dockerfile: infrastructure/docker/Dockerfile.service
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+
+services:
+  # ──────────────────────────────────────────────
+  # INFRASTRUCTURE
+  # ──────────────────────────────────────────────
+
+  postgres:
+    <<: *service-defaults
+    image: postgres:15-alpine
+    container_name: ikb-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ikb_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ikb_secret_2024}
+      POSTGRES_DB: ${POSTGRES_DB:-ikb_main}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ikb_admin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    <<: *service-defaults
+    image: redis:7-alpine
+    container_name: ikb-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-ikb_redis_2024} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-ikb_redis_2024}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    <<: *service-defaults
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: ikb-zookeeper
+    ports:
+      - "${ZOOKEEPER_PORT:-2181}:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    <<: *service-defaults
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ikb-kafka
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 8
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka-init:
+    <<: *service-defaults
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ikb-kafka-init
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Creating Kafka topics..."
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.sensors.raw --partitions 32 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.sensors.processed --partitions 16 --replication-factor 1 --config retention.ms=604800000
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.anomalies --partitions 8 --replication-factor 1 --config retention.ms=2592000000
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.agent.tasks --partitions 8 --replication-factor 1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.agent.results --partitions 8 --replication-factor 1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.alerts --partitions 4 --replication-factor 1 --config retention.ms=-1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.documents.ingestion --partitions 4 --replication-factor 1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.graph.updates --partitions 4 --replication-factor 1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.maintenance.events --partitions 4 --replication-factor 1
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic ikb.audit.log --partitions 2 --replication-factor 1 --config retention.ms=-1 --config cleanup.policy=compact
+        echo "All Kafka topics created successfully."
+        kafka-topics --bootstrap-server kafka:29092 --list
+
+  qdrant:
+    <<: *service-defaults
+    image: qdrant/qdrant:latest
+    container_name: ikb-qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    <<: *service-defaults
+    image: neo4j:5.12
+    container_name: ikb-neo4j
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-ikb_neo4j_2024}
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+      NEO4J_dbms_memory_heap_max__size: 1G
+      NEO4J_dbms_memory_pagecache_size: 512M
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-ikb_neo4j_2024} 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  influxdb:
+    <<: *service-defaults
+    image: influxdb:2.7
+    container_name: ikb-influxdb
+    ports:
+      - "${INFLUXDB_PORT:-8086}:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USER:-ikb_admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-ikb_influx_2024}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-factory-ai}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-telemetry}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-ikb-influx-dev-token-2024}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD-SHELL", "influx ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # MONITORING
+  # ──────────────────────────────────────────────
+
+  prometheus:
+    <<: *service-defaults
+    image: prom/prometheus:latest
+    container_name: ikb-prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    <<: *service-defaults
+    image: grafana/grafana:latest
+    container_name: ikb-grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-ikb_grafana_2024}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+  jaeger:
+    <<: *service-defaults
+    image: jaegertracing/all-in-one:latest
+    container_name: ikb-jaeger
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "4317:4317"
+      - "4318:4318"
+      - "6831:6831/udp"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  # ──────────────────────────────────────────────
+  # ML PLATFORM
+  # ──────────────────────────────────────────────
+
+  mlflow:
+    <<: *service-defaults
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: ikb-mlflow
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-ikb_admin}:${POSTGRES_PASSWORD:-ikb_secret_2024}@postgres:5432/mlflow
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    volumes:
+      - mlflow_data:/mlflow/artifacts
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER:-ikb_admin}:${POSTGRES_PASSWORD:-ikb_secret_2024}@postgres:5432/mlflow
+      --default-artifact-root /mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ──────────────────────────────────────────────
+  # BACKEND SERVICES
+  # ──────────────────────────────────────────────
+
+  api-gateway:
+    <<: *backend-defaults
+    container_name: ikb-api-gateway
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: api_gateway
+    ports:
+      - "${API_GATEWAY_PORT:-8000}:8000"
+    environment:
+      SERVICE_NAME: api_gateway
+      SERVICE_PORT: 8000
+      OTEL_SERVICE_NAME: api-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  rag-service:
+    <<: *backend-defaults
+    container_name: ikb-rag-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: rag_service
+    ports:
+      - "${RAG_SERVICE_PORT:-8001}:8000"
+    environment:
+      SERVICE_NAME: rag_service
+      SERVICE_PORT: 8000
+      OTEL_SERVICE_NAME: rag-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  agent-service:
+    <<: *backend-defaults
+    container_name: ikb-agent-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: agent_service
+    ports:
+      - "${AGENT_SERVICE_PORT:-8002}:8000"
+    environment:
+      SERVICE_NAME: agent_service
+      SERVICE_PORT: 8000
+      OTEL_SERVICE_NAME: agent-service
+
+  telemetry-service:
+    <<: *backend-defaults
+    container_name: ikb-telemetry-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: telemetry_service
+    ports:
+      - "${TELEMETRY_SERVICE_PORT:-8003}:8000"
+    environment:
+      SERVICE_NAME: telemetry_service
+      SERVICE_PORT: 8000
+      OTEL_SERVICE_NAME: telemetry-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+
+  knowledge-graph-service:
+    <<: *backend-defaults
+    container_name: ikb-knowledge-graph-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: knowledge_graph_service
+    ports:
+      - "${KG_SERVICE_PORT:-8004}:8000"
+    environment:
+      SERVICE_NAME: knowledge_graph_service
+      SERVICE_PORT: 8000
+      OTEL_SERVICE_NAME: knowledge-graph-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+  ingestion-service:
+    <<: *backend-defaults
+    container_name: ikb-ingestion-service
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.service
+      args:
+        SERVICE_NAME: ingestion_service
+    ports:
+      - "${INGESTION_SERVICE_PORT:-8005}:8000"
+    environment:
+      SERVICE_NAME: ingestion_service
+      SERVICE_PORT: 8000
+      OTEL_SERVICE_NAME: ingestion-service
+
+  # ──────────────────────────────────────────────
+  # FRONTEND
+  # ──────────────────────────────────────────────
+
+  frontend:
+    <<: *service-defaults
+    container_name: ikb-frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:${API_GATEWAY_PORT:-8000}
+      NEXT_PUBLIC_WS_URL: ws://localhost:${API_GATEWAY_PORT:-8000}
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres_data:
+  redis_data:
+  zookeeper_data:
+  zookeeper_logs:
+  kafka_data:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
+  influxdb_data:
+  prometheus_data:
+  grafana_data:
+  mlflow_data:
+
+networks:
+  ikb-network:
+    driver: bridge
+    name: ikb-network
