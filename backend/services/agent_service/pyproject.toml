@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "agent-service"
+version = "0.1.0"
+description = "IKB Agent Service — autonomous AI agents for industrial diagnostics"
+authors = ["Factory AI Team <team@factory-ai.io>"]
+packages = [{ include = "backend", from = "../../.." }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.111"
+uvicorn = { version = "^0.30", extras = ["standard"] }
+pydantic = "^2.7"
+pydantic-settings = "^2.3"
+aiokafka = "^0.10"
+langgraph = "^0.2"
+langchain = "^0.2"
+langchain-openai = "^0.1"
+structlog = "^24.2"
+orjson = "^3.10"
+opentelemetry-api = "^1.24"
+opentelemetry-sdk = "^1.24"
+opentelemetry-exporter-otlp = "^1.24"
+opentelemetry-instrumentation-fastapi = "^0.45b0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
