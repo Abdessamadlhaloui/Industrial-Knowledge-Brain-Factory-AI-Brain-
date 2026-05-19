@@ -21,6 +21,7 @@ class IngestDocumentCommand(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     doc_id: str
+    tenant_id: str
     text: str
     source_type: str
     metadata: Dict[str, Any]
@@ -130,14 +131,25 @@ class IngestDocumentHandler:
         async with self.db_pool.acquire() as conn:
             await conn.execute(query, cmd.doc_id, cmd.source_type, json.dumps(cmd.metadata), len(chunks))
 
-        # 6. Extract entities -> Kafka (mock logic for entity extraction)
-        # In reality, this would run an NER model over the text
-        extracted_entities = [{"entity": "machine_01", "type": "Asset"}]
-        await self.kafka_producer.send(
-            topic="ikb.graph.updates",
-            value={"doc_id": cmd.doc_id, "entities": extracted_entities},
-            key=cmd.doc_id
-        )
+        # 6. Send to Knowledge Graph extraction consumer
+        try:
+            payload = {
+                "doc_id": cmd.doc_id,
+                "text": cmd.text,
+                "tenant_id": cmd.tenant_id,
+                "doc_type": cmd.metadata.get("doc_type", "unknown")
+            }
+            await self.kafka_producer.send(
+                topic="ikb.kg.extract",
+                value=payload,
+                key=cmd.doc_id
+            )
+            logger.info("Published to ikb.kg.extract for doc_id=%s", cmd.doc_id)
+        except Exception as e:
+            # We swallow this exception because the Knowledge Graph is an eventually-consistent 
+            # downstream consumer. A Kafka publish failure here should not roll back the 
+            # primary RAG Qdrant ingestion. Operators can replay the failure later.
+            logger.error("Failed to publish to ikb.kg.extract for doc_id=%s: %s", cmd.doc_id, str(e))
 
         # 7. Emit DocumentIndexed event
         event_payload = {
