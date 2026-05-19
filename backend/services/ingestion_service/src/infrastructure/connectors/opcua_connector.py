@@ -1,154 +1,91 @@
 import asyncio
 import logging
-import time
-from typing import Any, Dict, List
+import os
+from typing import Any, Callable, List, Optional, Awaitable
 
-from asyncua import Client, Node
-from asyncua.common.subscription import SubHandler
-
-from backend.shared.infrastructure.messaging.kafka_producer import KafkaMessageProducer
+from asyncua import Client
 
 logger = logging.getLogger(__name__)
 
 
-class OPCUASubscriptionHandler(SubHandler):
-    """
-    Handler for OPC-UA subscription data changes.
-    """
-    def __init__(self, machine_id: str, tenant_id: str, factory_id: str, kafka_producer: KafkaMessageProducer):
-        self.machine_id = machine_id
-        self.tenant_id = tenant_id
-        self.factory_id = factory_id
-        self.kafka_producer = kafka_producer
-
-    async def datachange_notification(self, node: Node, val: Any, data: Any) -> None:
-        """
-        Called when a subscribed node's value changes.
-        """
-        try:
-            node_id = node.nodeid.Identifier
-            # Assuming node_id is something like "sensor_id.metric_name"
-            # For simplicity, we use node_id as sensor_id and metric_name
-            sensor_id = str(node_id)
-            metric_name = "opcua_value"  # Default if unable to parse
-
-            if isinstance(sensor_id, str) and "." in sensor_id:
-                parts = sensor_id.split(".")
-                sensor_id = parts[0]
-                metric_name = parts[1]
-
-            # data.monitored_item.Value has ServerTimestamp, SourceTimestamp, StatusCode
-            quality = 0
-            if hasattr(data.monitored_item.Value, "StatusCode") and data.monitored_item.Value.StatusCode:
-                quality = data.monitored_item.Value.StatusCode.value
-
-            timestamp = time.time() * 1000
-            if hasattr(data.monitored_item.Value, "SourceTimestamp") and data.monitored_item.Value.SourceTimestamp:
-                timestamp = data.monitored_item.Value.SourceTimestamp.timestamp() * 1000
-
-            payload = {
-                "sensor_id": sensor_id,
-                "machine_id": self.machine_id,
-                "metric_name": metric_name,
-                "value": float(val) if isinstance(val, (int, float)) else val,
-                "unit": "unknown",
-                "timestamp": timestamp,
-                "quality": quality,
-                "tenant_id": self.tenant_id,
-                "factory_id": self.factory_id
-            }
-
-            # Partition key is sensor_id as requested
-            await self.kafka_producer.send(
-                topic="ikb.sensors.raw",
-                value=payload,
-                key=sensor_id
-            )
-            logger.debug("Published OPC-UA datachange for node %s", node_id)
-        except Exception as e:
-            logger.error("Error processing OPC-UA datachange: %s", e)
-
-    def event_notification(self, event: Any) -> None:
-        pass
-
-
 class OPCUAConnector:
     """
-    OPC-UA Connector using asyncua.
-    Maintains subscriptions with 500ms sampling, monitors heartbeat, and handles exponential reconnects.
+    Async OPC-UA Connector using asyncua.
+    Manages connections to PLCs, node reading, and data change subscriptions.
     """
 
-    def __init__(
-        self, 
-        url: str, 
-        node_ids: List[str], 
-        machine_id: str, 
-        tenant_id: str, 
-        factory_id: str,
-        kafka_producer: KafkaMessageProducer
-    ):
-        self.url = url
-        self.node_ids = node_ids
-        self.machine_id = machine_id
-        self.tenant_id = tenant_id
-        self.factory_id = factory_id
-        self.kafka_producer = kafka_producer
-        self.client = Client(url=self.url)
-        self._running = False
-        self._monitor_task: asyncio.Task | None = None
+    def __init__(self) -> None:
+        self.endpoint = os.environ.get("OPCUA_ENDPOINT", "opc.tcp://localhost:4840/freeopcua/server/")
+        self.username = os.environ.get("OPCUA_USERNAME")
+        self.password = os.environ.get("OPCUA_PASSWORD")
+        
+        self.client: Optional[Client] = None
+        self.subscription: Any = None
 
-    async def start(self) -> None:
-        self._running = True
-        self._monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("OPC-UA connector started for %s", self.url)
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._monitor_task:
-            self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
+    async def connect(self) -> None:
+        """Establishes an async connection to the OPC-UA server."""
         try:
-            await self.client.disconnect()
-        except Exception:
-            pass
-        logger.info("OPC-UA connector stopped for %s", self.url)
+            self.client = Client(url=self.endpoint)
+            
+            if self.username and self.password:
+                self.client.set_user(self.username)
+                self.client.set_password(self.password)
+                
+            await self.client.connect()
+            logger.info("Successfully connected to OPC-UA endpoint: %s", self.endpoint)
+        except Exception as e:
+            logger.error("Failed to connect to OPC-UA endpoint '%s': %s", self.endpoint, str(e))
+            raise e
 
-    async def _monitor_loop(self) -> None:
-        backoff = 1.0
-        max_backoff = 60.0
+    async def read_node(self, node_id: str) -> Any:
+        """Reads the current value of a specific OPC-UA node."""
+        if not self.client:
+            raise RuntimeError("OPCUAConnector is not connected.")
+            
+        try:
+            node = self.client.get_node(node_id)
+            value = await node.read_value()
+            return value
+        except Exception as e:
+            logger.error("Failed to read OPC-UA node '%s': %s", node_id, str(e))
+            raise e
 
-        while self._running:
+    async def subscribe(self, node_ids: List[str], handler: Callable[[str, Any], Awaitable[None]]) -> None:
+        """
+        Subscribes to data changes on the specified nodes.
+        Delegates changes to the injected async handler.
+        """
+        if not self.client:
+            raise RuntimeError("OPCUAConnector is not connected.")
+
+        class SubHandler:
+            def datachange_notification(self, node: Any, val: Any, data: Any) -> None:
+                asyncio.ensure_future(handler(str(node), val))
+
+        try:
+            self.subscription = await self.client.create_subscription(500, SubHandler())
+            
+            for node_id in node_ids:
+                node = self.client.get_node(node_id)
+                await self.subscription.subscribe_data_change(node)
+                
+            logger.info("Successfully subscribed to %d OPC-UA nodes.", len(node_ids))
+        except Exception as e:
+            logger.error("Failed to establish OPC-UA subscription: %s", str(e))
+            raise e
+
+    async def disconnect(self) -> None:
+        """Gracefully tears down subscriptions and the OPC-UA client connection."""
+        if self.subscription:
             try:
-                logger.info("Connecting to OPC-UA server %s", self.url)
-                await self.client.connect()
-                backoff = 1.0  # Reset backoff on successful connect
-
-                # Setup subscriptions (500ms requested)
-                handler = OPCUASubscriptionHandler(
-                    self.machine_id, self.tenant_id, self.factory_id, self.kafka_producer
-                )
-                sub = await self.client.create_subscription(500, handler)
-                
-                nodes = [self.client.get_node(nid) for nid in self.node_ids]
-                await sub.subscribe_data_change(nodes)
-                logger.info("Subscribed to %d nodes on %s", len(nodes), self.url)
-
-                # Heartbeat loop
-                while self._running:
-                    # Simple heartbeat: read ServerStatus time
-                    server_time_node = self.client.get_node("i=2258")
-                    await server_time_node.read_value()
-                    await asyncio.sleep(5.0)
-
+                await self.subscription.delete()
+                logger.info("OPC-UA subscription deleted.")
             except Exception as e:
-                logger.error("OPC-UA connection error: %s. Reconnecting in %.1f seconds...", e, backoff)
-                try:
-                    await self.client.disconnect()
-                except Exception:
-                    pass
+                logger.warning("Error deleting OPC-UA subscription: %s", str(e))
                 
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+        if self.client:
+            try:
+                await self.client.disconnect()
+                logger.info("Disconnected from OPC-UA endpoint.")
+            except Exception as e:
+                logger.warning("Error disconnecting OPC-UA client: %s", str(e))
