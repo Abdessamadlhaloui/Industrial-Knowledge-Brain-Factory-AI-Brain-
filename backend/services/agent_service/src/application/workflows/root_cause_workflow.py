@@ -6,6 +6,7 @@ from langgraph.graph import StateGraph, END
 from backend.services.agent_service.src.domain.models.agent_task import AgentTask
 from backend.services.agent_service.src.infrastructure.tools.telemetry_tool import TelemetryTool
 from backend.services.agent_service.src.infrastructure.tools.rag_tool import RagTool
+from backend.services.agent_service.src.infrastructure.tools.graph_tool import GraphTool
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,37 @@ async def retrieve_knowledge(state: RCAWorkflowState) -> RCAWorkflowState:
 
 async def analyze_graph(state: RCAWorkflowState) -> RCAWorkflowState:
     logger.info("Workflow: Analyzing Graph")
-    state["graph_context"] = "Mock Graph: Motor -> Spindle -> Bearing"
+    
+    task = state.get("task")
+    if not task:
+        state["graph_context"] = "Error: No task provided in state."
+        return state
+        
+    machine_id = task.metadata.get("machine_id")
+    if not machine_id:
+        state["graph_context"] = "No graph context retrieved: 'machine_id' missing from task metadata."
+        return state
+
+    # Note: GraphTool should be dependency-injected in production.
+    # Instantiating directly for now.
+    tool = GraphTool()
+    
+    params = {
+        "query_type": "causal_analysis",
+        "machine_id": machine_id
+    }
+    
+    try:
+        result = await tool.execute(params)
+        if result.success:
+            state["graph_context"] = str(result.data)
+        else:
+            logger.error("GraphTool returned failure: %s", result.error)
+            state["graph_context"] = f"Error retrieving graph context: {result.error}"
+    except Exception as exc:
+        logger.error("Exception during GraphTool execution: %s", exc)
+        state["graph_context"] = f"Error retrieving graph context: {exc}"
+        
     return state
 
 
