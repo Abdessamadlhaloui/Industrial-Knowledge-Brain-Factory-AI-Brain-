@@ -14,6 +14,22 @@ class GDSAlgorithms:
     def __init__(self, client: Neo4jClient):
         self.client = client
 
+    async def find_central_nodes(self, graph_name: str) -> List[Dict[str, Any]]:
+        """
+        Find the most central nodes in the graph using the GDS PageRank algorithm.
+        """
+        query = """
+        CALL gds.pageRank.stream($graphName)
+        YIELD nodeId, score
+        RETURN gds.util.asNode(nodeId).name AS name, score
+        ORDER BY score DESC LIMIT 10
+        """
+        try:
+            return await self.client.execute_query(query, {"graphName": graph_name})
+        except Exception as e:
+            logger.error("Failed executing PageRank for central nodes in graph '%s': %s", graph_name, str(e))
+            raise e
+
     async def _project_graph_if_not_exists(self, graph_name: str, node_projection: str, rel_projection: str) -> None:
         """Helper to create an in-memory graph projection for GDS algorithms."""
         check_query = "CALL gds.graph.exists($graph_name) YIELD exists RETURN exists"
