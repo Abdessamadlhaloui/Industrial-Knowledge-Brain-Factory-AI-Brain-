@@ -1,5 +1,8 @@
+import os
 import logging
 from typing import Optional
+
+import mlflow.pytorch
 
 try:
     import torch
@@ -59,21 +62,31 @@ class MLDetector:
         self.model = None
         self._load_model()
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         if not TORCH_AVAILABLE:
             logger.warning("PyTorch not available. MLDetector falling back to StatisticalDetector.")
             return
 
         try:
-            # In a real scenario, this loads from MLflow registry
-            # self.model = mlflow.pytorch.load_model("models:/IndustrialLSTM/Production")
+            tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+            model_name = os.environ.get("MLFLOW_MODEL_NAME", "telemetry-lstm-autoencoder")
+            model_stage = os.environ.get("MLFLOW_MODEL_STAGE", "Production")
             
-            # We initialize a blank model for the mock
-            self.model = LSTMAutoencoder(seq_len=60, n_features=1)
+            mlflow.set_tracking_uri(tracking_uri)
+            model_uri = f"models:/{model_name}/{model_stage}"
+            
+            self.model = mlflow.pytorch.load_model(model_uri)
             self.model.eval()
-            logger.info("MLDetector initialized with LSTM Autoencoder.")
+            
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.model.to(self.device)
+            
+            logger.info(
+                "MLDetector initialized with model '%s' at stage '%s' on device '%s'.", 
+                model_name, model_stage, self.device
+            )
         except Exception as e:
-            logger.warning("Failed to load ML model, falling back to StatisticalDetector: %s", e)
+            logger.critical("Failed to load ML model from MLflow: %s", str(e))
             self.model = None
 
     async def detect(self, sensor_id: str, machine_id: str, value: float, timestamp: float) -> Optional[Anomaly]:
