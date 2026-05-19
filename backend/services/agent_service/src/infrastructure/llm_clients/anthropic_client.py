@@ -2,22 +2,32 @@ import logging
 import os
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from anthropic import AsyncAnthropic, APIStatusError, APITimeoutError
+import anthropic
+from anthropic import AsyncAnthropic, APIStatusError, APITimeoutError, APIError
 from backend.shared.utils.retry import retry
 
 logger = logging.getLogger(__name__)
 
 
+class LLMClientError(Exception):
+    """Domain-level exception for LLM API failures."""
+    pass
+
+
 class AnthropicClient:
     """
-    Anthropic Claude 3.5 Sonnet client wrapper.
+    Anthropic Claude client wrapper.
     Translates tool schemas to Claude's format and handles retries.
     """
 
-    def __init__(self, model_name: str = "claude-3-5-sonnet-20240620"):
+    def __init__(self, model_name: str = "claude-sonnet-4-20250514"):
         self.model_name = model_name
         self.api_key = os.getenv("ANTHROPIC_API_KEY")
-        self.client = AsyncAnthropic(api_key=self.api_key) if self.api_key else None
+        if not self.api_key:
+            raise EnvironmentError(
+                "ANTHROPIC_API_KEY is required and not set. Cannot start agent_service without a valid LLM client."
+            )
+        self.client = AsyncAnthropic(api_key=self.api_key)
 
     def _format_tools(self, tools: List[Any]) -> List[Dict[str, Any]]:
         """Converts BaseTool instances into Anthropic's tool_use format."""
@@ -42,10 +52,6 @@ class AnthropicClient:
         """
         Execute completion with retries.
         """
-        if not self.client:
-            logger.warning("ANTHROPIC_API_KEY not set. Mocking response.")
-            return self._mock_response(messages)
-
         kwargs = {
             "model": self.model_name,
             "max_tokens": max_tokens,
@@ -56,16 +62,11 @@ class AnthropicClient:
         if tools:
             kwargs["tools"] = self._format_tools(tools)
             
-        if stream:
-            return await self.client.messages.create(stream=True, **kwargs)
-            
-        return await self.client.messages.create(**kwargs)
-
-    def _mock_response(self, messages: List[Dict[str, Any]]) -> Any:
-        """Mock response for testing without API key."""
-        class MockMessage:
-            def __init__(self):
-                self.content = [{"type": "text", "text": "Mock LLM response."}]
-                self.stop_reason = "end_turn"
-                self.usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 10})()
-        return MockMessage()
+        try:
+            if stream:
+                return await self.client.messages.create(stream=True, **kwargs)
+                
+            return await self.client.messages.create(**kwargs)
+        except APIError as e:
+            logger.error("Anthropic API call failed: %s", str(e))
+            raise LLMClientError(f"Failed to fetch LLM completion: {str(e)}") from e
