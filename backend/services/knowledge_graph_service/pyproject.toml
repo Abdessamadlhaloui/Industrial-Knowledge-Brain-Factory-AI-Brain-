@@ -19,6 +19,9 @@ opentelemetry-api = "^1.24"
 opentelemetry-sdk = "^1.24"
 opentelemetry-exporter-otlp = "^1.24"
 opentelemetry-instrumentation-fastapi = "^0.45b0"
+spacy = "^3.7.4"
+openai = "^1.10.0"
+redis = { version = "^5.0.0", extras = ["hiredis"] }
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]

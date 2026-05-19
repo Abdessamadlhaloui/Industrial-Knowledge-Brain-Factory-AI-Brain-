@@ -20,6 +20,8 @@ opentelemetry-api = "^1.24"
 opentelemetry-sdk = "^1.24"
 opentelemetry-exporter-otlp = "^1.24"
 opentelemetry-instrumentation-fastapi = "^0.45b0"
+pyjwt = { version = "^2.8", extras = ["crypto"] }
+websockets = "^12.0"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]

@@ -21,6 +21,12 @@ opentelemetry-api = "^1.24"
 opentelemetry-sdk = "^1.24"
 opentelemetry-exporter-otlp = "^1.24"
 opentelemetry-instrumentation-fastapi = "^0.45b0"
+tiktoken = "^0.7.0"
+sentence-transformers = "^3.0.0"
+numpy = "^1.26.0"
+rank_bm25 = "^0.2.2"
+openai = "^1.10.0"
+prometheus-client = "^0.20.0"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]

@@ -22,6 +22,13 @@ opentelemetry-api = "^1.24"
 opentelemetry-sdk = "^1.24"
 opentelemetry-exporter-otlp = "^1.24"
 opentelemetry-instrumentation-fastapi = "^0.45b0"
+pymupdf = "^1.24.4"
+pdfplumber = "^0.11.0"
+pandas = "^2.2.2"
+openpyxl = "^3.1.2"
+asyncua = "^1.1.0"
+aiomqtt = "^2.1.0"
+aiobotocore = "^2.13.0"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]
