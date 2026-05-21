@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable
 
 import orjson
 from aiokafka import AIOKafkaProducer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 
 class KafkaProducerConfig(BaseModel):
-    bootstrap_servers: str = "localhost:9092"
+    # Production: set KAFKA_BOOTSTRAP_SERVERS=kafka:9092 in container env
+    bootstrap_servers: str = Field(
+        default_factory=lambda: os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    )
     client_id: str = "ikb-producer"
     acks: str = "all"
     max_batch_size: int = 16384
@@ -109,13 +113,13 @@ class KafkaMessageProducer:
                 timestamp=None,
             )
             if metadata is None:
-                partitions = await self._producer.partitions_for(topic)
-                await self._producer.send_batch(batch, topic, partition=0)
+                # Let Kafka partition by message key for even distribution
+                await self._producer.send_batch(batch, topic)
                 batch = self._producer.create_batch()
                 batch.append(key=key.encode() if key else None, value=serialized, timestamp=None)
 
-        partitions = await self._producer.partitions_for(topic)
-        await self._producer.send_batch(batch, topic, partition=0)
+        # Let Kafka partition by message key for even distribution
+        await self._producer.send_batch(batch, topic)
         logger.debug("Produced batch of %d messages to %s", len(messages), topic)
 
     @staticmethod
