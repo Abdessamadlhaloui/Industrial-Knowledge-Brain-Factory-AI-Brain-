@@ -89,37 +89,143 @@ class MLDetector:
             logger.critical("Failed to load ML model from MLflow: %s", str(e))
             self.model = None
 
-    async def detect(self, sensor_id: str, machine_id: str, value: float, timestamp: float) -> Optional[Anomaly]:
+    async def detect(
+    self,
+    sensor_id: str,
+    machine_id: str,
+    value: float,
+    timestamp: float,
+) -> Optional[Anomaly]:
         if not self.model or not TORCH_AVAILABLE:
-            return await self.fallback_detector.detect(sensor_id, machine_id, value, timestamp)
-            
-        # In a real implementation, we would maintain a rolling window of the last 60 readings
-        # per sensor in Redis, fetch them, tensorize them, and run batch inference.
-        
-        # Mocking the inference process to demonstrate architecture
-        # with torch.no_grad():
-        #    reconstruction = self.model(tensor_data)
-        #    mse = torch.mean((tensor_data - reconstruction) ** 2).item()
-        
-        mse = 0.01  # Mock normal mse
-        
-        if mse > self.threshold:
-            # Check deduplication
-            is_dup = await self.fallback_detector.redis_cache.is_duplicate_anomaly(sensor_id, "HIGH", 300)
-            if is_dup:
-                return None
-                
-            anomaly = Anomaly(
-                sensor_id=sensor_id,
-                machine_id=machine_id,
-                value=value,
-                expected_range=f"MSE < {self.threshold}",
-                z_score=0.0,
-                severity="HIGH",
-                timestamp=timestamp
+            return await self.fallback_detector.detect(
+                sensor_id,
+                machine_id,
+                value,
+                timestamp,
             )
-            await self.fallback_detector.redis_cache.add_recent_anomaly(machine_id, anomaly.__dict__, timestamp)
-            logger.warning("ML Anomaly Detected: %s on %s (MSE: %.4f)", sensor_id, machine_id, mse)
-            return anomaly
-            
-        return None
+
+        redis_key: str = (
+            f"telemetry:window:{machine_id}:{sensor_id}"
+        )
+
+        try:
+            redis_client = (
+                self.fallback_detector.redis_cache.client
+            )
+
+            # Maintain rolling window of last 60 telemetry points
+            pipeline = redis_client.pipeline()
+
+            await pipeline.rpush(
+                redis_key,
+                f"{timestamp}:{value}",
+            )
+
+            await pipeline.ltrim(
+                redis_key,
+                -60,
+                -1,
+            )
+
+            await pipeline.execute()
+
+            # Fetch full rolling window
+            raw_window = await redis_client.lrange(
+                redis_key,
+                0,
+                -1,
+            )
+
+            # Not enough sequence history yet
+            if len(raw_window) < 60:
+                return await self.fallback_detector.detect(
+                    sensor_id,
+                    machine_id,
+                    value,
+                    timestamp,
+                )
+
+            values: list[float] = []
+
+            for item in raw_window:
+                decoded: str = item.decode()
+                _, raw_value = decoded.split(":", 1)
+
+                values.append(float(raw_value))
+
+            # Shape: [1, 60, 1]
+            tensor_data = (
+                torch.tensor(
+                    [values],
+                    dtype=torch.float32,
+                )
+                .unsqueeze(-1)
+                .to(self.device)
+            )
+
+            with torch.no_grad():
+                reconstruction = self.model(tensor_data)
+
+                mse: float = torch.mean(
+                    (tensor_data - reconstruction) ** 2
+                ).item()
+
+            if mse > self.threshold:
+                is_dup = await (
+                    self.fallback_detector.redis_cache
+                    .is_duplicate_anomaly(
+                        sensor_id,
+                        "HIGH",
+                        300,
+                    )
+                )
+
+                if is_dup:
+                    return None
+
+                anomaly = Anomaly(
+                    sensor_id=sensor_id,
+                    machine_id=machine_id,
+                    value=value,
+                    expected_range=f"MSE < {self.threshold}",
+                    z_score=0.0,
+                    severity="HIGH",
+                    timestamp=timestamp,
+                )
+
+                await (
+                    self.fallback_detector.redis_cache
+                    .add_recent_anomaly(
+                        machine_id,
+                        anomaly.__dict__,
+                        timestamp,
+                    )
+                )
+
+                logger.warning(
+                    "ML anomaly detected for sensor_id=%s "
+                    "machine_id=%s mse=%.6f",
+                    sensor_id,
+                    machine_id,
+                    mse,
+                )
+
+                return anomaly
+
+            return None
+
+        except Exception:
+            logger.error(
+                "MLDetector inference failed for "
+                "sensor_id=%s machine_id=%s",
+                sensor_id,
+                machine_id,
+                exc_info=True,
+            )
+
+            return await self.fallback_detector.detect(
+                sensor_id,
+                machine_id,
+                value,
+                timestamp,
+            )
