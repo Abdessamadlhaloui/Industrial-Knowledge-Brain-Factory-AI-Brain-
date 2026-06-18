@@ -109,8 +109,10 @@ class MLDetector:
         )
 
         try:
+            # Note : l'attribut s'appelle `.redis`, pas `.client`
+            # (voir TelemetryRedisCache.__init__)
             redis_client = (
-                self.fallback_detector.redis_cache.client
+                self.fallback_detector.redis_cache.redis
             )
 
             # Maintain rolling window of last 60 telemetry points
